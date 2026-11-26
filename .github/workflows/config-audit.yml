@@ -8,7 +8,6 @@ on:
       - "*.py"
       - "tests/**"
       - ".github/workflows/config-audit.yml"
-  workflow_dispatch:
 
 # id-token: write lets the job request a GitHub OIDC token, which is exchanged
 # for a short-lived Claude API token. No API key is stored in this repository.
