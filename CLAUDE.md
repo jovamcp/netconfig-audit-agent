@@ -18,7 +18,7 @@ It is the first component of a larger plan:
 
 - `audit_agent.py`: orchestration, secret redaction, Claude review, Markdown and JSON reports
 - `rules.py`: deterministic checks IOS-001 to IOS-020; each rule is a function in `ALL_RULES`
-- `configs/`: synthetic lab configurations (one vulnerable, one hardened)
+- `configs/`: synthetic lab configurations (a vulnerable router, a hardened router, an access switch with a few intentional misconfigurations)
 - `tests/test_rules.py`: unit tests
 - `.github/workflows/config-audit.yml`: the pipeline
 

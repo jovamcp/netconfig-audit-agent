@@ -14,7 +14,11 @@ sys.path.insert(0, str(ROOT))
 
 import audit_agent  # noqa: E402
 
-CONFIGS = str(ROOT / "configs")
+# Two fixed files, so adding sample configurations does not change these tests.
+CONFIG_FILES = [
+    str(ROOT / "configs" / "lab-r1-vulnerable.cfg"),
+    str(ROOT / "configs" / "lab-r2-hardened.cfg"),
+]
 FEDERATION_ENV = {
     "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_test",
     "ANTHROPIC_ORGANIZATION_ID": "org_test",
@@ -44,7 +48,7 @@ def mock_client(side_effect=None):
 
 class AgentRun(unittest.TestCase):
     def run_agent(self, env, client=None, extra_args=(), factory_error=None, with_report=False):
-        """Run main() against configs/ and return (exit code, stdout, make_client mock, findings)."""
+        """Run main() against CONFIG_FILES and return (exit code, stdout, make_client mock, findings)."""
         clean_env = {
             key: value for key, value in os.environ.items()
             if not key.startswith("ANTHROPIC_") and key != "GITHUB_STEP_SUMMARY"
@@ -53,7 +57,7 @@ class AgentRun(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             json_path = Path(tmp) / "findings.json"
             report_path = Path(tmp) / "report.md"
-            argv = [CONFIGS, "--out", str(report_path), "--json", str(json_path), *extra_args]
+            argv = [*CONFIG_FILES, "--out", str(report_path), "--json", str(json_path), *extra_args]
             stdout = io.StringIO()
             with mock.patch.dict(os.environ, clean_env, clear=True), \
                     mock.patch.object(audit_agent, "make_client", return_value=client, side_effect=factory_error) as make_client, \

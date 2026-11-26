@@ -44,6 +44,7 @@ The rules are the baseline and keep working with no API access. The AI review ad
 | `rules.py` | Deterministic Cisco IOS checks (IOS-001 to IOS-020) |
 | `configs/lab-r1-vulnerable.cfg` | Synthetic router with intentional misconfigurations |
 | `configs/lab-r2-hardened.cfg` | Synthetic router with the hardened baseline |
+| `configs/lab-sw1-access.cfg` | Synthetic access-layer switch, mostly reasonable, with a few intentional misconfigurations |
 | `tests/test_rules.py` | Unit tests for rules, redaction and response parsing |
 | `.github/workflows/config-audit.yml` | The pipeline |
 
@@ -85,7 +86,7 @@ gh api repos/OWNER/REPO --jq .id     # REPO_ID
 
 The surest method is not to build the subject by hand. Let one run fail, open the failed attempt in the authentication events on the **Workload identity** page of the Console, and copy its `sub` value into the rule.
 
-The rule only accepts `push` events on `main`. A run started manually with `workflow_dispatch` carries a different event and is rejected.
+The rule only accepts `push` events on `main`. A run started manually with `workflow_dispatch` carries a different event and is rejected, which is why the workflow has no manual trigger.
 
 ### 2. Add repository variables
 
@@ -110,7 +111,7 @@ To run the audit again without a new commit, re-run the last push-triggered run.
 gh run rerun RUN_ID
 ```
 
-Do not start the workflow manually from the **Actions** tab (`workflow_dispatch`) when the federation variables are set: the rule only accepts `push` events, so the AI review fails with 401. Note that `gh run rerun --failed` only works when a job failed.
+The workflow has no manual trigger (`workflow_dispatch`) on purpose: the rule only accepts `push` events, so a manually started run would fail the AI review with 401. Note that `gh run rerun --failed` only works when a job failed.
 
 Until the variables are set, the pipeline runs in rules-only mode.
 
@@ -126,7 +127,7 @@ python -m unittest discover -s tests -v
 A failed token exchange always returns `401 Authentication failed`. The reason is shown in the authentication events on the **Workload identity** page of the Console; search for the `request_id` printed in the error. Usual causes:
 
 - The subject in the rule does not match the token. Check the immutable format with the numeric IDs (see "Getting the subject right") and copy the `sub` from the failed attempt.
-- The run was started with `workflow_dispatch` instead of a push. Use `gh run rerun RUN_ID` on a push-triggered run.
+- The run was not triggered by a push (for example a `workflow_dispatch` trigger was added back). Use `gh run rerun RUN_ID` on a push-triggered run.
 
 ## Roadmap
 
