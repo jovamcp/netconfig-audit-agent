@@ -26,7 +26,7 @@ redaction  -->  Claude review (additional findings, false positives, priorities)
                      report.md + findings.json
 ```
 
-The rules are the baseline and keep working with no API access. The AI review adds judgement on top. If the API call fails, the report still contains the rule findings.
+The rules are the baseline and keep working with no API access. The AI review adds judgement on top. If the API call fails, the report still contains the rule findings. The run then exits with status 1 and prints a GitHub Actions error annotation naming the file, so a failed AI review never looks like a healthy run. Rules-only mode (no credentials, or `--no-llm`) exits 0.
 
 ## Security design
 

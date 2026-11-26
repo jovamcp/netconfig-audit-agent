@@ -105,9 +105,19 @@ def extract_json(text: str) -> dict | None:
         return None
 
 
-def ai_review(name: str, redacted_config: str, findings: list[Finding], model: str) -> dict:
+def make_client():
+    """Create the Claude API client.
+
+    Called once per run: with Workload Identity Federation every new client
+    performs its own token exchange, and the GitHub OIDC token is only
+    accepted once.
+    """
     import anthropic  # imported here so rules-only mode needs no dependencies
 
+    return anthropic.Anthropic()
+
+
+def ai_review(client, name: str, redacted_config: str, findings: list[Finding], model: str) -> dict:
     numbered = "\n".join(
         f"{number:>4}: {line}" for number, line in enumerate(redacted_config.splitlines(), 1)
     )
@@ -117,7 +127,6 @@ def ai_review(name: str, redacted_config: str, findings: list[Finding], model: s
         f"<rule_findings>\n{payload}\n</rule_findings>\n\n"
         f"<configuration>\n{numbered}\n</configuration>"
     )
-    client = anthropic.Anthropic()
     message = client.messages.create(
         model=model,
         max_tokens=4000,
@@ -150,7 +159,8 @@ def ai_findings(review: dict) -> list[Finding]:
     return results
 
 
-def audit_file(path: Path, use_llm: bool, model: str) -> dict:
+def audit_file(path: Path, client, model: str) -> dict:
+    """Audit one file. With client=None only the deterministic rules run."""
     text = path.read_text(encoding="utf-8", errors="replace")
     findings = run_rules(text)
     for finding in findings:
@@ -158,9 +168,9 @@ def audit_file(path: Path, use_llm: bool, model: str) -> dict:
 
     review: dict = {}
     error = None
-    if use_llm:
+    if client is not None:
         try:
-            review = ai_review(path.name, redact(text), findings, model)
+            review = ai_review(client, path.name, redact(text), findings, model)
             findings.extend(ai_findings(review))
         except Exception as exc:  # the rule findings are still worth reporting
             error = f"{type(exc).__name__}: {exc}"
@@ -252,7 +262,12 @@ def render_report(results: list[dict], mode: str, model: str) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def main() -> int:
+def workflow_escape(text: str) -> str:
+    """Escape a message for a GitHub Actions workflow command."""
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audit Cisco IOS configurations for misconfigurations.")
     parser.add_argument("targets", nargs="+", help="configuration files or directories")
     parser.add_argument("--out", default="report.md", help="Markdown report path")
@@ -263,7 +278,7 @@ def main() -> int:
         "--fail-on", default="none", choices=["none", *SEVERITY_ORDER],
         help="exit with status 1 when a finding at or above this severity exists",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     files = collect_files(args.targets)
     if not files:
@@ -275,7 +290,18 @@ def main() -> int:
         print("note: no Claude API credentials found, running rules only", file=sys.stderr)
     mode = "rules + AI review" if use_llm else "rules only"
 
-    results = [audit_file(path, use_llm, args.model) for path in files]
+    client = None
+    client_error = None
+    if use_llm:
+        try:
+            client = make_client()
+        except Exception as exc:  # still report the rule findings, then fail below
+            client_error = f"{type(exc).__name__}: {exc}"
+
+    results = [audit_file(path, client, args.model) for path in files]
+    if client_error:
+        for result in results:
+            result["ai_error"] = client_error
 
     report = render_report(results, mode, args.model)
     Path(args.out).write_text(report, encoding="utf-8")
@@ -302,12 +328,22 @@ def main() -> int:
     total = sum(len(r["findings"]) for r in results)
     print(f"{len(files)} file(s) audited, {total} finding(s), mode: {mode}. Report: {args.out}")
 
+    exit_code = 0
     if args.fail_on != "none":
         threshold = SEVERITY_ORDER[args.fail_on]
         if any(SEVERITY_ORDER[f.severity] >= threshold for r in results for f in r["findings"]):
             print(f"failing: findings at or above '{args.fail_on}' severity")
-            return 1
-    return 0
+            exit_code = 1
+
+    # AI review was requested and configured: a failed review must not look healthy.
+    failed = [r for r in results if r["ai_error"]]
+    for result in failed:
+        message = workflow_escape(f"AI review failed for {result['file']}: {result['ai_error']}")
+        print(f"::error file={result['file']},title=AI review failed::{message}")
+    if failed:
+        print(f"failing: AI review failed for {len(failed)} of {len(results)} file(s)")
+        exit_code = 1
+    return exit_code
 
 
 if __name__ == "__main__":
