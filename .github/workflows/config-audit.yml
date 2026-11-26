@@ -1,0 +1,64 @@
+name: Config audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "configs/**"
+      - "*.py"
+      - "tests/**"
+      - ".github/workflows/config-audit.yml"
+  workflow_dispatch:
+
+# id-token: write lets the job request a GitHub OIDC token, which is exchanged
+# for a short-lived Claude API token. No API key is stored in this repository.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+      ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+      ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+      ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+      ANTHROPIC_IDENTITY_TOKEN_FILE: /tmp/gha-jwt
+      AUDIT_MODEL: ${{ vars.AUDIT_MODEL || 'claude-sonnet-5-5' }}
+      # Set the FAIL_ON repository variable to "high" to block pushes that
+      # introduce high-severity findings. Default is report-only.
+      FAIL_ON: ${{ vars.FAIL_ON || 'none' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Fetch GitHub OIDC token
+        if: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID != '' }}
+        run: |
+          curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" \
+            | jq -r .value > "$ANTHROPIC_IDENTITY_TOKEN_FILE"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Audit configurations
+        run: python audit_agent.py configs/ --out report.md --json findings.json --fail-on "$FAIL_ON"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-audit-report
+          path: |
+            report.md
+            findings.json
+          if-no-files-found: ignore
