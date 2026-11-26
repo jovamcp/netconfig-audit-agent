@@ -57,12 +57,35 @@ In the Claude Console, open **Settings > Workload identity**, select **Connect w
 |---|---|
 | Issuer URL | `https://token.actions.githubusercontent.com` |
 | Audience | `https://api.anthropic.com` |
-| Subject prefix | `repo:<owner>/netconfig-audit-agent:ref:refs/heads/main` |
+| Subject prefix | `repo:OWNER@OWNER_ID/REPO@REPO_ID:ref:refs/heads/main` (see below) |
 | Claim `repository_owner` | `<owner>` |
 | Workspace | the workspace that should receive the traffic |
 | OAuth scope | `workspace:developer` |
 
 The wizard creates a service account and a federation rule. Record the `svac_...` and `fdrl_...` IDs.
+
+#### Getting the subject right
+
+The subject must match the `sub` claim of the GitHub OIDC token exactly. A mismatch is the most common reason for `401 Authentication failed`.
+
+Repositories created after July 15, 2026 use the immutable subject format, which includes the numeric owner and repository IDs:
+
+```
+repo:OWNER@OWNER_ID/REPO@REPO_ID:ref:refs/heads/main
+```
+
+Older repositories use the short format `repo:OWNER/REPO:ref:refs/heads/main`. A rule written in the short format does not match a token from a newer repository.
+
+Get both IDs with the GitHub CLI:
+
+```
+gh api users/OWNER --jq .id          # OWNER_ID (use orgs/OWNER for an organization)
+gh api repos/OWNER/REPO --jq .id     # REPO_ID
+```
+
+The surest method is not to build the subject by hand. Let one run fail, open the failed attempt in the authentication events on the **Workload identity** page of the Console, and copy its `sub` value into the rule.
+
+The rule only accepts `push` events on `main`. A run started manually with `workflow_dispatch` carries a different event and is rejected.
 
 ### 2. Add repository variables
 
@@ -79,7 +102,15 @@ These are identifiers, not secrets, so they are stored as variables. Optional va
 
 ### 3. Run it
 
-Push to `main`, or start the workflow manually from the **Actions** tab. Open the run to read the report in the summary.
+Push to `main`. Open the run to read the report in the summary.
+
+To run the audit again without a new commit, re-run the last push-triggered run. It keeps the `push` event and requests a fresh OIDC token:
+
+```
+gh run rerun RUN_ID
+```
+
+Do not start the workflow manually from the **Actions** tab (`workflow_dispatch`) when the federation variables are set: the rule only accepts `push` events, so the AI review fails with 401. Note that `gh run rerun --failed` only works when a job failed.
 
 Until the variables are set, the pipeline runs in rules-only mode.
 
@@ -92,7 +123,10 @@ python -m unittest discover -s tests -v
 
 ## Troubleshooting
 
-A failed token exchange always returns `401 Authentication failed`. The reason is shown in the Console under **Workload identity > History**. The usual cause is a subject prefix that does not match the event that triggered the run.
+A failed token exchange always returns `401 Authentication failed`. The reason is shown in the authentication events on the **Workload identity** page of the Console; search for the `request_id` printed in the error. Usual causes:
+
+- The subject in the rule does not match the token. Check the immutable format with the numeric IDs (see "Getting the subject right") and copy the `sub` from the failed attempt.
+- The run was started with `workflow_dispatch` instead of a push. Use `gh run rerun RUN_ID` on a push-triggered run.
 
 ## Roadmap
 
