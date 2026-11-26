@@ -26,6 +26,7 @@ from pathlib import Path
 from rules import SEVERITY_ORDER, Finding, run_rules
 
 DEFAULT_MODEL = os.environ.get("AUDIT_MODEL", "claude-sonnet-5-5")
+MAX_TOKENS = 8000
 CONFIG_SUFFIXES = {".cfg", ".conf", ".txt", ".ios"}
 
 # Each pattern captures (prefix, secret). Only the secret is replaced.
@@ -57,6 +58,13 @@ positive only when the configuration clearly shows it is not a real problem.
 protocol authentication, ACL logic errors, unused services, weak crypto).
 - Do not repeat rule findings as additional findings.
 - Prioritise: what should be fixed first and why.
+
+Keep the answer bounded:
+- At most 10 additional findings, ordered from highest to lowest severity. \
+If there are more, keep the 10 most important.
+- Each "fix" is at most 5 lines.
+- Report only real problems. A well-hardened configuration should get a \
+short answer with few or no additional findings.
 
 Respond with one JSON object and nothing else, using this shape:
 {
@@ -105,6 +113,14 @@ def extract_json(text: str) -> dict | None:
         return None
 
 
+class AIReviewError(Exception):
+    """The model answered, but the answer cannot be used as a review."""
+
+    def __init__(self, message: str, stop_reason: str | None = None):
+        super().__init__(message)
+        self.stop_reason = stop_reason
+
+
 def make_client():
     """Create the Claude API client.
 
@@ -129,14 +145,21 @@ def ai_review(client, name: str, redacted_config: str, findings: list[Finding], 
     )
     message = client.messages.create(
         model=model,
-        max_tokens=4000,
+        max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
     )
+    stop_reason = message.stop_reason
+    if stop_reason == "max_tokens":
+        raise AIReviewError(
+            f"response was truncated at max_tokens={MAX_TOKENS} (stop_reason: max_tokens)", stop_reason
+        )
     text = "".join(block.text for block in message.content if block.type == "text")
     parsed = extract_json(text)
     if parsed is None:
-        return {"summary": text.strip(), "additional_findings": [], "false_positives": [], "priorities": []}
+        # The raw text is deliberately not kept: it must not reach the report.
+        raise AIReviewError(f"response was not valid JSON (stop_reason: {stop_reason})", stop_reason)
+    parsed["stop_reason"] = stop_reason
     return parsed
 
 
@@ -173,10 +196,17 @@ def audit_file(path: Path, client, model: str) -> dict:
             review = ai_review(client, path.name, redact(text), findings, model)
             findings.extend(ai_findings(review))
         except Exception as exc:  # the rule findings are still worth reporting
+            review = {"stop_reason": getattr(exc, "stop_reason", None)}
             error = f"{type(exc).__name__}: {exc}"
 
     findings.sort(key=lambda f: (-SEVERITY_ORDER[f.severity], f.line or 0, f.rule_id))
-    return {"file": str(path), "findings": findings, "review": review, "ai_error": error}
+    return {
+        "file": str(path),
+        "findings": findings,
+        "review": review,
+        "stop_reason": review.get("stop_reason"),
+        "ai_error": error,
+    }
 
 
 def collect_files(targets: list[str]) -> list[Path]:
@@ -311,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "file": r["file"],
                     "risk_level": r["review"].get("risk_level"),
+                    "stop_reason": r["stop_reason"],
                     "ai_error": r["ai_error"],
                     "findings": [asdict(f) for f in r["findings"]],
                 }

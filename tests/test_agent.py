@@ -28,9 +28,13 @@ REVIEW = {
 }
 
 
+def reply_with(text, stop_reason="end_turn"):
+    return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)], stop_reason=stop_reason)
+
+
 def mock_client(side_effect=None):
     client = mock.MagicMock()
-    reply = SimpleNamespace(content=[SimpleNamespace(type="text", text=json.dumps(REVIEW))])
+    reply = reply_with(json.dumps(REVIEW))
     if side_effect is None:
         client.messages.create.return_value = reply
     else:
@@ -39,7 +43,7 @@ def mock_client(side_effect=None):
 
 
 class AgentRun(unittest.TestCase):
-    def run_agent(self, env, client=None, extra_args=(), factory_error=None):
+    def run_agent(self, env, client=None, extra_args=(), factory_error=None, with_report=False):
         """Run main() against configs/ and return (exit code, stdout, make_client mock, findings)."""
         clean_env = {
             key: value for key, value in os.environ.items()
@@ -48,13 +52,17 @@ class AgentRun(unittest.TestCase):
         clean_env.update(env)
         with tempfile.TemporaryDirectory() as tmp:
             json_path = Path(tmp) / "findings.json"
-            argv = [CONFIGS, "--out", str(Path(tmp) / "report.md"), "--json", str(json_path), *extra_args]
+            report_path = Path(tmp) / "report.md"
+            argv = [CONFIGS, "--out", str(report_path), "--json", str(json_path), *extra_args]
             stdout = io.StringIO()
             with mock.patch.dict(os.environ, clean_env, clear=True), \
                     mock.patch.object(audit_agent, "make_client", return_value=client, side_effect=factory_error) as make_client, \
                     contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
                 code = audit_agent.main(argv)
             findings = json.loads(json_path.read_text())
+            report = report_path.read_text()
+        if with_report:
+            return code, stdout.getvalue(), make_client, findings, report
         return code, stdout.getvalue(), make_client, findings
 
     def test_one_client_is_shared_across_files(self):
@@ -65,12 +73,13 @@ class AgentRun(unittest.TestCase):
         make_client.assert_called_once_with()
         self.assertEqual(client.messages.create.call_count, 2)
         self.assertTrue(all(f["ai_error"] is None and f["risk_level"] == "low" for f in findings))
+        self.assertTrue(all(f["stop_reason"] == "end_turn" for f in findings))
+        self.assertEqual(client.messages.create.call_args.kwargs["max_tokens"], 8000)
         self.assertIn("mode: rules + AI review", out)
         self.assertNotIn("::error", out)
 
     def test_ai_review_failure_exits_1_with_annotation(self):
-        reply = SimpleNamespace(content=[SimpleNamespace(type="text", text=json.dumps(REVIEW))])
-        client = mock_client(side_effect=[reply, RuntimeError("Token exchange failed (HTTP 401)\nsecond line")])
+        client = mock_client(side_effect=[reply_with(json.dumps(REVIEW)), RuntimeError("Token exchange failed (HTTP 401)\nsecond line")])
         code, out, _, findings = self.run_agent(FEDERATION_ENV, client)
         self.assertEqual(code, 1)
         # Reports are still written, with the rule findings and the error recorded.
@@ -80,6 +89,40 @@ class AgentRun(unittest.TestCase):
         self.assertEqual(len(annotations), 1)
         self.assertIn("lab-r2-hardened.cfg", annotations[0])
         self.assertIn("RuntimeError: Token exchange failed (HTTP 401)%0Asecond line", annotations[0])
+
+    def assert_unusable_response_fails(self, bad_reply, expected_error, stop_reason, leaked_text):
+        client = mock_client(side_effect=[reply_with(json.dumps(REVIEW)), bad_reply])
+        code, out, _, findings, report = self.run_agent(FEDERATION_ENV, client, with_report=True)
+        self.assertEqual(code, 1)
+        self.assertIsNone(findings[0]["ai_error"])
+        self.assertIn(expected_error, findings[1]["ai_error"])
+        self.assertEqual(findings[1]["stop_reason"], stop_reason)
+        self.assertIsNone(findings[1]["risk_level"])
+        annotations = [line for line in out.splitlines() if line.startswith("::error")]
+        self.assertEqual(len(annotations), 1)
+        self.assertIn("lab-r2-hardened.cfg", annotations[0])
+        self.assertIn(expected_error, annotations[0])
+        # The raw model text must not be dumped anywhere.
+        self.assertIn("AI review failed", report)
+        for output in (report, out, json.dumps(findings)):
+            self.assertNotIn(leaked_text, output)
+
+    def test_truncated_response_is_a_failed_review(self):
+        truncated = '{"risk_level": "low", "summary": "TRUNCATED-MARKER looks fine", "additional_findings": [{"sev'
+        self.assert_unusable_response_fails(
+            reply_with(truncated, stop_reason="max_tokens"), "truncated at max_tokens", "max_tokens", "TRUNCATED-MARKER"
+        )
+
+    def test_truncated_response_fails_even_if_json_parses(self):
+        complete_looking = json.dumps({**REVIEW, "summary": "TRUNCATED-MARKER"})
+        self.assert_unusable_response_fails(
+            reply_with(complete_looking, stop_reason="max_tokens"), "truncated at max_tokens", "max_tokens", "TRUNCATED-MARKER"
+        )
+
+    def test_non_json_response_is_a_failed_review(self):
+        self.assert_unusable_response_fails(
+            reply_with("PLAIN-TEXT-MARKER: the configuration looks fine."), "not valid JSON", "end_turn", "PLAIN-TEXT-MARKER"
+        )
 
     def test_client_creation_failure_exits_1(self):
         code, out, _, findings = self.run_agent(FEDERATION_ENV, factory_error=ImportError("no anthropic"))
